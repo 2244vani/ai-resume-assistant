@@ -1,0 +1,7 @@
+env/
+venv/
+.env
+.idea/
+__pycache__/
+*.pyc
+uploaded_resume.pdf
