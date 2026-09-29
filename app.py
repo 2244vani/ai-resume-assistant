@@ -1,23 +1,71 @@
-import streamlit as st
-from typing import TypedDict
+import os
 import re
+from typing import TypedDict
 
-from langchain_ollama import ChatOllama, OllamaEmbeddings
+import streamlit as st
+from dotenv import load_dotenv
+
 from langchain_community.document_loaders import PyPDFLoader
 from langchain_text_splitters import RecursiveCharacterTextSplitter
 from langchain_chroma import Chroma
+from langchain_huggingface import HuggingFaceEmbeddings
+from langchain_groq import ChatGroq
 
 from langgraph.graph import StateGraph, START, END
 
 
 # ==========================================================
-# PAGE
+# LOAD ENVIRONMENT VARIABLES
+# ==========================================================
+
+load_dotenv()
+
+
+# ==========================================================
+# GET GROQ API KEY
+# ==========================================================
+
+def get_groq_api_key():
+
+    # Streamlit Cloud
+    try:
+        if "GROQ_API_KEY" in st.secrets:
+            return st.secrets["GROQ_API_KEY"]
+    except Exception:
+        pass
+
+    # Local .env
+    return os.getenv("GROQ_API_KEY")
+
+
+GROQ_API_KEY = get_groq_api_key()
+
+
+if not GROQ_API_KEY:
+
+    st.error("GROQ_API_KEY is not configured.")
+
+    st.info(
+        "Add GROQ_API_KEY to your local .env file "
+        "or Streamlit Cloud Secrets."
+    )
+
+    st.stop()
+
+
+# ==========================================================
+# PAGE CONFIGURATION
 # ==========================================================
 
 st.set_page_config(
     page_title="AI Resume Assistant",
     page_icon="📄"
 )
+
+
+# ==========================================================
+# TITLE
+# ==========================================================
 
 st.title("📄 AI Resume Assistant")
 
@@ -46,7 +94,10 @@ if uploaded_file is not None:
     # ======================================================
 
     with open("uploaded_resume.pdf", "wb") as f:
-        f.write(uploaded_file.getbuffer())
+
+        f.write(
+            uploaded_file.getbuffer()
+        )
 
 
     # ======================================================
@@ -74,7 +125,9 @@ if uploaded_file is not None:
     )
 
 
-    st.success("Resume processed successfully!")
+    st.success(
+        "Resume processed successfully!"
+    )
 
     st.write(
         "Number of resume chunks:",
@@ -83,14 +136,14 @@ if uploaded_file is not None:
 
 
     # ======================================================
-    # EMBEDDINGS
+    # HUGGING FACE EMBEDDINGS
     # ======================================================
 
     @st.cache_resource
     def get_embeddings():
 
-        return OllamaEmbeddings(
-            model="nomic-embed-text"
+        return HuggingFaceEmbeddings(
+            model_name="sentence-transformers/all-MiniLM-L6-v2"
         )
 
 
@@ -134,7 +187,7 @@ if uploaded_file is not None:
 
 
     # ======================================================
-    # BUTTON
+    # ANALYZE BUTTON
     # ======================================================
 
     analyze_button = st.button(
@@ -169,26 +222,25 @@ if uploaded_file is not None:
         class State(TypedDict):
 
             question: str
-
             job_description: str
-
             context: str
-
             answer: str
 
 
         # ==================================================
-        # OLLAMA MODEL
+        # GROQ MODEL
         # ==================================================
 
-        model = ChatOllama(
-            model="llama3.2"
+        model = ChatGroq(
+            model="openai/gpt-oss-20b",
+            temperature=0,
+            api_key=GROQ_API_KEY
         )
 
 
         # ==================================================
         # NODE 1
-        # RESUME RETRIEVAL
+        # RETRIEVE RESUME
         # ==================================================
 
         def retrieve_resume(
@@ -214,7 +266,7 @@ if uploaded_file is not None:
 
         # ==================================================
         # NODE 2
-        # RESUME ANALYSIS
+        # ANALYZE RESUME
         # ==================================================
 
         def analyze_resume(
@@ -240,7 +292,7 @@ JOB DESCRIPTION
 {state["job_description"]}
 
 
-Give the answer using EXACTLY these sections:
+Return the answer using EXACTLY these sections:
 
 1. RESUME SUMMARY
 
@@ -261,11 +313,11 @@ Do not invent anything.
 List ONLY the skills under the
 "Required Skills" section of the job description.
 
+Write each skill on a separate line.
+
 Do not include preferred skills.
 
-Do not include education.
-
-Do not include experience.
+Do not write explanations.
 
 
 3. PREFERRED SKILLS
@@ -273,7 +325,11 @@ Do not include experience.
 List ONLY the skills under the
 "Preferred Skills" section of the job description.
 
+Write each skill on a separate line.
+
 Do not include required skills.
+
+Do not write explanations.
 
 
 4. MATCHING SKILLS
@@ -281,9 +337,13 @@ Do not include required skills.
 List ONLY the REQUIRED SKILLS that clearly
 appear in the resume.
 
+Write each skill on a separate line.
+
 Do not include preferred skills.
 
 Do not guess.
+
+Do not write explanations.
 
 
 5. MISSING SKILLS
@@ -291,9 +351,13 @@ Do not guess.
 List ONLY the REQUIRED SKILLS that are not
 found in the resume.
 
+Write each skill on a separate line.
+
 Do not include preferred skills.
 
 Do not include skills that are already matching.
+
+Do not write explanations.
 
 
 6. MATCH PERCENTAGE
@@ -322,143 +386,241 @@ IMPORTANT RULES:
 - Matching skills must come only from required skills.
 - Missing skills must come only from required skills.
 - Use simple language.
+- Put every skill on its own line.
 """
 
 
-            response = model.invoke(
-                prompt
-            )
+            # ==================================================
+            # CALL GROQ
+            # ==================================================
 
+            try:
 
-            answer = response.content
+                response = model.invoke(
+                    prompt
+                )
+
+                answer = response.content
+
+            except Exception as e:
+
+                return {
+                    "answer": f"ERROR: {str(e)}"
+                }
 
 
             # ==================================================
-            # FIND SECTIONS
+            # CLEAN MARKDOWN FORMATTING
             # ==================================================
 
-            required_start = answer.find(
-                "2. REQUIRED SKILLS"
+            # Convert escaped markdown
+            answer = answer.replace(
+                r"\*\*",
+                "**"
             )
 
-            preferred_start = answer.find(
-                "3. PREFERRED SKILLS"
+            # Remove bold/italic formatting specifically
+            # around numbered section headings.
+            section_names = [
+                "RESUME SUMMARY",
+                "REQUIRED SKILLS",
+                "PREFERRED SKILLS",
+                "MATCHING SKILLS",
+                "MISSING SKILLS",
+                "MATCH PERCENTAGE",
+                "SUGGESTIONS"
+            ]
+
+            for number, section_name in enumerate(
+                section_names,
+                start=1
+            ):
+
+                pattern = (
+                    r"\*{0,3}"
+                    r"\s*"
+                    + str(number)
+                    + r"\.\s*"
+                    + re.escape(section_name)
+                    + r"\s*"
+                    r"\*{0,3}"
+                )
+
+                answer = re.sub(
+                    pattern,
+                    f"{number}. {section_name}",
+                    answer,
+                    flags=re.IGNORECASE
+                )
+
+
+            # ==================================================
+            # FIND SECTION POSITIONS
+            # ==================================================
+
+            required_match = re.search(
+                r"(?im)^\s*2\.\s*REQUIRED SKILLS\s*$",
+                answer
             )
 
-            matching_start = answer.find(
-                "4. MATCHING SKILLS"
+            preferred_match = re.search(
+                r"(?im)^\s*3\.\s*PREFERRED SKILLS\s*$",
+                answer
             )
 
-            missing_start = answer.find(
-                "5. MISSING SKILLS"
+            matching_match = re.search(
+                r"(?im)^\s*4\.\s*MATCHING SKILLS\s*$",
+                answer
             )
+
+            missing_match = re.search(
+                r"(?im)^\s*5\.\s*MISSING SKILLS\s*$",
+                answer
+            )
+
+            percentage_match = re.search(
+                r"(?im)^\s*6\.\s*MATCH PERCENTAGE\s*$",
+                answer
+            )
+
+            suggestions_match = re.search(
+                r"(?im)^\s*7\.\s*SUGGESTIONS\s*$",
+                answer
+            )
+
+
+            # ==================================================
+            # EXTRACT SKILLS FROM A SECTION
+            # ==================================================
+
+            def extract_skills(section_text):
+
+                skills = []
+
+                for line in section_text.splitlines():
+
+                    line = line.strip()
+
+                    if not line:
+                        continue
+
+
+                    # Remove markdown bullets
+                    line = re.sub(
+                        r"^[-•*]\s*",
+                        "",
+                        line
+                    )
+
+
+                    # Remove markdown formatting
+                    line = line.replace(
+                        "**",
+                        ""
+                    )
+
+                    line = line.replace(
+                        "__",
+                        ""
+                    )
+
+                    line = line.replace(
+                        "`",
+                        ""
+                    )
+
+                    line = line.strip()
+
+
+                    # Ignore headings
+                    if re.match(
+                        r"^\d+\.",
+                        line
+                    ):
+                        continue
+
+
+                    # Ignore instruction-like text
+                    lower_line = line.lower()
+
+                    if lower_line.startswith(
+                        (
+                            "list only",
+                            "do not",
+                            "write each",
+                            "match percentage will",
+                            "none",
+                            "n/a"
+                        )
+                    ):
+                        continue
+
+
+                    skills.append(line)
+
+
+                # Remove duplicates
+                unique_skills = []
+
+                seen = set()
+
+                for skill in skills:
+
+                    key = skill.lower().strip()
+
+                    if key not in seen:
+
+                        seen.add(key)
+
+                        unique_skills.append(
+                            skill
+                        )
+
+                return unique_skills
 
 
             # ==================================================
             # CALCULATE MATCH PERCENTAGE
             # ==================================================
 
-            match_percentage = 0
+            match_percentage_value = 0
 
 
             if (
-                required_start != -1
-                and matching_start != -1
-                and missing_start != -1
+                required_match
+                and preferred_match
+                and matching_match
+                and missing_match
             ):
-
-                required_section = answer[
-                    required_start:preferred_start
-                    if preferred_start != -1
-                    else matching_start
-                ]
-
-
-                matching_section = answer[
-                    matching_start:missing_start
-                ]
-
 
                 # ----------------------------------------------
                 # REQUIRED SKILLS
                 # ----------------------------------------------
 
-                required_skills = []
-
-                for line in required_section.splitlines():
-
-                    line = line.strip()
-
-                    if line.startswith("-"):
-
-                        skill = line[1:].strip()
-
-                        if skill:
-
-                            required_skills.append(
-                                skill
-                            )
+                required_section = answer[
+                    required_match.end():
+                    preferred_match.start()
+                ]
 
 
-                # Remove duplicates
-
-                unique_required = []
-
-                seen = set()
-
-
-                for skill in required_skills:
-
-                    key = skill.lower()
-
-                    if key not in seen:
-
-                        seen.add(key)
-
-                        unique_required.append(
-                            skill
-                        )
+                required_skills = extract_skills(
+                    required_section
+                )
 
 
                 # ----------------------------------------------
                 # MATCHING SKILLS
                 # ----------------------------------------------
 
-                matching_skills = []
-
-                for line in matching_section.splitlines():
-
-                    line = line.strip()
-
-                    if line.startswith("-"):
-
-                        skill = line[1:].strip()
-
-                        if skill:
-
-                            matching_skills.append(
-                                skill
-                            )
+                matching_section = answer[
+                    matching_match.end():
+                    missing_match.start()
+                ]
 
 
-                # Remove duplicates
-
-                unique_matching = []
-
-                seen = set()
-
-
-                for skill in matching_skills:
-
-                    key = skill.lower()
-
-                    if key not in seen:
-
-                        seen.add(key)
-
-                        unique_matching.append(
-                            skill
-                        )
+                matching_skills = extract_skills(
+                    matching_section
+                )
 
 
                 # ----------------------------------------------
@@ -468,13 +630,14 @@ IMPORTANT RULES:
                 valid_matches = []
 
 
-                for matching_skill in unique_matching:
+                for matching_skill in matching_skills:
 
-                    for required_skill in unique_required:
+                    for required_skill in required_skills:
 
                         if (
-                            matching_skill.lower()
-                            == required_skill.lower()
+                            matching_skill.strip().lower()
+                            ==
+                            required_skill.strip().lower()
                         ):
 
                             if required_skill not in valid_matches:
@@ -485,35 +648,45 @@ IMPORTANT RULES:
 
 
                 # ----------------------------------------------
-                # PERCENTAGE
+                # CALCULATE
                 # ----------------------------------------------
 
-                if unique_required:
+                if required_skills:
 
-                    match_percentage = (
-                        len(valid_matches)
-                        /
-                        len(unique_required)
-                    ) * 100
+                    match_percentage_value = round(
+                        (
+                            len(valid_matches)
+                            /
+                            len(required_skills)
+                        ) * 100,
+                        2
+                    )
 
 
-                match_percentage = round(
-                    match_percentage,
-                    2
+            # ==================================================
+            # REPLACE MATCH PERCENTAGE SECTION
+            # ==================================================
+
+            if (
+                percentage_match
+                and suggestions_match
+            ):
+
+                before_percentage = answer[
+                    :percentage_match.start()
+                ]
+
+                after_percentage = answer[
+                    suggestions_match.start():
+                ]
+
+                answer = (
+                    before_percentage
+                    + "6. MATCH PERCENTAGE\n\n"
+                    + f"{match_percentage_value}%"
+                    + "\n\n"
+                    + after_percentage
                 )
-
-
-            # ==================================================
-            # REPLACE PERCENTAGE
-            # ==================================================
-
-            answer = re.sub(
-                r"6\.\s*MATCH PERCENTAGE:?.*?(?=7\.\s*SUGGESTIONS:)",
-                f"6. MATCH PERCENTAGE:\n\n"
-                f"{match_percentage}%",
-                answer,
-                flags=re.DOTALL
-            )
 
 
             return {
@@ -573,7 +746,7 @@ IMPORTANT RULES:
 
 
         # ==================================================
-        # RUN
+        # RUN LANGGRAPH
         # ==================================================
 
         with st.spinner(
@@ -583,11 +756,8 @@ IMPORTANT RULES:
             result = app.invoke(
                 {
                     "question": question,
-
                     "job_description": job_description,
-
                     "context": "",
-
                     "answer": ""
                 }
             )
@@ -606,29 +776,30 @@ IMPORTANT RULES:
 
 
         # ==================================================
-        # MATCH PERCENTAGE
+        # GET MATCH PERCENTAGE
         # ==================================================
 
-        percentage_match = re.search(
-            r"6\.\s*MATCH PERCENTAGE:?\s*(\d+(?:\.\d+)?)%",
-            answer
+        final_percentage = re.search(
+            r"6\.\s*MATCH PERCENTAGE\s+(\d+(?:\.\d+)?)%",
+            answer,
+            flags=re.IGNORECASE
         )
 
 
-        if percentage_match:
+        if final_percentage:
 
             match_percentage = float(
-                percentage_match.group(1)
+                final_percentage.group(1)
             )
 
             st.metric(
                 "Resume Match Percentage",
-                f"{match_percentage}%"
+                f"{match_percentage:g}%"
             )
 
 
         # ==================================================
-        # COMPLETE ANSWER
+        # DISPLAY COMPLETE ANSWER
         # ==================================================
 
         st.markdown(

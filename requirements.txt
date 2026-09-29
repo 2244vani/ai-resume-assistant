@@ -2,10 +2,12 @@ streamlit
 langchain
 langchain-core
 langchain-community
-langchain-ollama
+langchain-groq
+langchain-huggingface
 langchain-chroma
 langchain-text-splitters
 langgraph
 chromadb
+sentence-transformers
 pypdf
-ollama
+python-dotenv
